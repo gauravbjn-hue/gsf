@@ -324,10 +324,15 @@ class GSF_Donation_Form {
         $message_lines[] = 'Regards,';
         $message_lines[] = $company_name;
 
+        $pdf_attachment = $this->generate_pdf_receipt($data, $company_name);
+        $attachments = $pdf_attachment ? [$pdf_attachment] : [];
+
         wp_mail(
             $data['donor_email'],
             $subject,
-            implode("\n", $message_lines)
+            implode("\n", $message_lines),
+            [],
+            $attachments
         );
 
         $admin_subject = sprintf('New donation received via %s', $company_name);
@@ -345,12 +350,91 @@ class GSF_Donation_Form {
             $admin_message .= "\nMessage: " . $data['donor_message'];
         }
 
-        wp_mail($admin_email, $admin_subject, $admin_message);
+        wp_mail($admin_email, $admin_subject, $admin_message, [], $attachments);
     }
 
     private function get_options(): array {
         $options = get_option(self::OPTION_KEY, []);
         return is_array($options) ? $options : [];
+    }
+
+    private function generate_pdf_receipt(array $data, string $company_name): ?string {
+        $upload_dir = wp_upload_dir();
+        if (empty($upload_dir['path']) || !is_dir($upload_dir['path'])) {
+            return null;
+        }
+
+        $filename = sprintf(
+            'donation-receipt-%s.pdf',
+            preg_replace('/[^a-zA-Z0-9_-]/', '', $data['payment_id'])
+        );
+        $file_path = trailingslashit($upload_dir['path']) . $filename;
+
+        $lines = [
+            $company_name . ' Donation Receipt',
+            'Donor: ' . $data['donor_name'],
+            'Email: ' . $data['donor_email'],
+            'Phone: ' . $data['donor_phone'],
+            'Amount: ' . $data['amount'] . ' ' . $data['currency'],
+            'Payment ID: ' . $data['payment_id'],
+            'Order ID: ' . $data['order_id'],
+            'Date: ' . current_time('mysql'),
+        ];
+
+        if (!empty($data['donor_message'])) {
+            $lines[] = 'Message: ' . $data['donor_message'];
+        }
+
+        $pdf_content = $this->build_simple_pdf($lines);
+
+        if (false === file_put_contents($file_path, $pdf_content)) {
+            return null;
+        }
+
+        return $file_path;
+    }
+
+    private function build_simple_pdf(array $lines): string {
+        $escaped_lines = array_map(
+            function ($line) {
+                return str_replace(['\\', '(', ')'], ['\\\\', '\\(', '\\)'], $line);
+            },
+            $lines
+        );
+
+        $y = 760;
+        $text_blocks = [];
+        foreach ($escaped_lines as $line) {
+            $text_blocks[] = sprintf('1 0 0 1 50 %d Tm (%s) Tj', $y, $line);
+            $y -= 18;
+        }
+
+        $stream = "BT\n/F1 12 Tf\n" . implode("\n", $text_blocks) . "\nET";
+        $stream_length = strlen($stream);
+
+        $objects = [];
+        $objects[] = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj";
+        $objects[] = "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj";
+        $objects[] = "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj";
+        $objects[] = "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj";
+        $objects[] = "5 0 obj\n<< /Length $stream_length >>\nstream\n$stream\nendstream\nendobj";
+
+        $pdf = "%PDF-1.4\n";
+        $offsets = [];
+        foreach ($objects as $object) {
+            $offsets[] = strlen($pdf);
+            $pdf .= $object . "\n";
+        }
+
+        $xref_position = strlen($pdf);
+        $pdf .= "xref\n0 " . (count($objects) + 1) . "\n";
+        $pdf .= "0000000000 65535 f \n";
+        foreach ($offsets as $offset) {
+            $pdf .= sprintf("%010d 00000 n \n", $offset);
+        }
+        $pdf .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\nstartxref\n$xref_position\n%%EOF";
+
+        return $pdf;
     }
 }
 
